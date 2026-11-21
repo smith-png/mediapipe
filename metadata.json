@@ -1,0 +1,8 @@
+{
+  "name": "Sandevistan Cam",
+  "description": "Real-time Cyberpunk: Edgerunners Sandevistan webcam afterimage effect powered by in-browser MediaPipe face, gesture, and selfie segmentation.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}

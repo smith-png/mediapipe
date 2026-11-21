@@ -1,0 +1,197 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Barlow Condensed", sans-serif;
+  --font-sans: "Manrope", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100dvh;
+    margin: 0;
+    padding: 0;
+    background-color: #06070b;
+    color: #f1f5f9;
+    font-family: var(--font-sans);
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Custom sleek cyberpunk range slider */
+input[type="range"].cyber-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 28px;
+  background: transparent;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+input[type="range"].cyber-slider:focus {
+  outline: none;
+}
+
+input[type="range"].cyber-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 2px;
+}
+
+input[type="range"].cyber-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -7px;
+  background: #00f0ff;
+  border: 2px solid #06070b;
+  border-radius: 2px;
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.65);
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.12s ease;
+}
+
+input[type="range"].cyber-slider:active::-webkit-slider-thumb {
+  transform: scale(1.15);
+  background: #ff2bd6;
+  box-shadow: 0 0 12px rgba(255, 43, 214, 0.75);
+}
+
+input[type="range"].cyber-slider::-moz-range-track {
+  height: 4px;
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 2px;
+}
+
+input[type="range"].cyber-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  background: #00f0ff;
+  border: 2px solid #06070b;
+  border-radius: 2px;
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.65);
+}
+
+/* Chamfered corner clip for primary CTA */
+.cyber-chamfer {
+  clip-path: polygon(
+    0 0,
+    calc(100% - 12px) 0,
+    100% 12px,
+    100% 100%,
+    12px 100%,
+    0 calc(100% - 12px)
+  );
+}
+
+/* Sandevistan Activated Glitch Animation */
+@keyframes sandy-glitch-main {
+  0%, 88%, 100% {
+    transform: translate(0, 0) skewX(0deg);
+  }
+  90% {
+    transform: translate(-2px, 1px) skewX(-6deg);
+  }
+  92% {
+    transform: translate(3px, -1px) skewX(4deg);
+  }
+  94% {
+    transform: translate(-1px, 0) skewX(-2deg);
+  }
+  96% {
+    transform: translate(2px, 1px) skewX(0deg);
+  }
+}
+
+@keyframes sandy-glitch-cyan {
+  0%, 100% {
+    clip-path: inset(12% 0 68% 0);
+    transform: translate(-3px, -1px);
+  }
+  20% {
+    clip-path: inset(58% 0 14% 0);
+    transform: translate(3px, 1px);
+  }
+  40% {
+    clip-path: inset(28% 0 46% 0);
+    transform: translate(-2px, 0);
+  }
+  60% {
+    clip-path: inset(72% 0 6% 0);
+    transform: translate(2px, -1px);
+  }
+  80% {
+    clip-path: inset(8% 0 78% 0);
+    transform: translate(-4px, 1px);
+  }
+}
+
+@keyframes sandy-glitch-magenta {
+  0%, 100% {
+    clip-path: inset(62% 0 10% 0);
+    transform: translate(3px, 1px);
+  }
+  25% {
+    clip-path: inset(16% 0 60% 0);
+    transform: translate(-3px, -1px);
+  }
+  50% {
+    clip-path: inset(44% 0 32% 0);
+    transform: translate(4px, 0);
+  }
+  75% {
+    clip-path: inset(80% 0 4% 0);
+    transform: translate(-2px, 1px);
+  }
+}
+
+.sandy-glitch {
+  position: relative;
+  display: inline-block;
+  animation: sandy-glitch-main 1.4s steps(2, end) infinite;
+}
+
+.sandy-glitch::before,
+.sandy-glitch::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.sandy-glitch::before {
+  color: #00f0ff;
+  text-shadow: -2px 0 rgba(0, 240, 255, 0.85);
+  animation: sandy-glitch-cyan 0.65s steps(3, end) infinite;
+  opacity: 0.9;
+}
+
+.sandy-glitch::after {
+  color: #ff2bd6;
+  text-shadow: 2px 0 rgba(255, 43, 214, 0.85);
+  animation: sandy-glitch-magenta 0.55s steps(2, end) infinite;
+  opacity: 0.9;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sandy-glitch,
+  .sandy-glitch::before,
+  .sandy-glitch::after {
+    animation: none;
+  }
+  .sandy-glitch::before {
+    clip-path: none;
+    transform: translate(-1px, 0);
+    opacity: 0.5;
+  }
+  .sandy-glitch::after {
+    clip-path: none;
+    transform: translate(1px, 0);
+    opacity: 0.5;
+  }
+}
