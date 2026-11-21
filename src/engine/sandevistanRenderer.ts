@@ -76,6 +76,7 @@ export class SandevistanRenderer {
   // Polarity calibration for single-channel selfie segmenter masks
   private invertSingleMask = false;
   private polarityCalibrated = false;
+  private mirrored = true;
 
   // Ring buffer of pre-tinted ghost cutouts
   private trailPool: TrailSlot[] = [];
@@ -169,12 +170,18 @@ export class SandevistanRenderer {
   }
 
   /**
-   * Draws the current mirrored video frame into the internal reduced-res surface.
+   * Draws the current video frame into the internal reduced-res surface,
+   * horizontally mirrored for front camera or unmirrored for rear camera.
    */
-  captureMirroredFrame(video: HTMLVideoElement): void {
+  captureMirroredFrame(video: HTMLVideoElement, mirror = true): void {
+    this.mirrored = mirror;
     const ctx = this.mirrorSurface.ctx;
     ctx.save();
-    ctx.setTransform(-1, 0, 0, 1, this.procWidth, 0);
+    if (mirror) {
+      ctx.setTransform(-1, 0, 0, 1, this.procWidth, 0);
+    } else {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
     ctx.drawImage(video, 0, 0, this.procWidth, this.procHeight);
     ctx.restore();
   }
@@ -243,8 +250,8 @@ export class SandevistanRenderer {
       const rowOffset = y * mw;
       const sampleRow = (y & 3) === 0;
       for (let x = 0; x < mw; x++) {
-        // Flip X so mask aligns with horizontally mirrored front camera
-        const srcX = mw - 1 - x;
+        // Flip X only when front camera is mirrored so mask aligns with captured frame
+        const srcX = this.mirrored ? mw - 1 - x : x;
         let conf = data[rowOffset + srcX];
         if (invert) conf = 1 - conf;
 

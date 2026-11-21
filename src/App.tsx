@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { VideoOff } from 'lucide-react';
+import {
+  RefreshCw,
+  SlidersHorizontal,
+  VideoOff,
+  X,
+} from 'lucide-react';
+import {
+  CanvasRecorder,
+  MAX_RECORDING_MS,
+} from './engine/canvasRecorder';
 import { VisionEngine } from './engine/mediapipe';
 import { SandevistanRenderer } from './engine/sandevistanRenderer';
 import {
@@ -7,6 +16,11 @@ import {
   evaluateFaceTrigger,
   evaluateGestureTrigger,
 } from './engine/triggerEvaluator';
+import {
+  RecordingHud,
+  type RecordingHudHandle,
+} from './components/RecordingHud';
+import { RecordingPreviewModal } from './components/RecordingPreviewModal';
 import { SandevistanBadge } from './components/SandevistanBadge';
 import {
   SettingsPanel,
@@ -15,7 +29,9 @@ import {
 import { StartOverlay } from './components/StartOverlay';
 import type {
   CameraErrorInfo,
+  CameraFacing,
   CameraStatus,
+  RecordedClip,
   SandevistanSettings,
 } from './types/sandevistan';
 import {
@@ -44,7 +60,7 @@ function describeCameraError(err: unknown): CameraErrorInfo {
     return {
       title: 'Camera permission denied',
       message:
-        'Access to the front camera was blocked. Allow camera permission to run the Sandevistan effect.',
+        'Access to the camera was blocked. Allow camera permission to run the Sandevistan effect.',
       hint: 'In Chrome, tap the lock or tune icon next to the address bar, set Camera to Allow, then tap Try Again.',
     };
   }
@@ -52,7 +68,7 @@ function describeCameraError(err: unknown): CameraErrorInfo {
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
     return {
       title: 'No camera detected',
-      message: 'We could not find a front-facing camera on this device.',
+      message: 'We could not find a camera on this device.',
       hint: 'Check that a webcam is connected and enabled in your device settings.',
     };
   }
@@ -74,16 +90,23 @@ function describeCameraError(err: unknown): CameraErrorInfo {
   };
 }
 
-async function acquireFrontCameraStream(): Promise<MediaStream> {
+interface AcquiredCameraResult {
+  stream: MediaStream;
+  actualFacing: CameraFacing;
+  fellBackToFront: boolean;
+}
+
+async function requestStreamForFacing(
+  facing: CameraFacing
+): Promise<MediaStream> {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     throw new Error('Camera API is unavailable in this browser context.');
   }
 
-  // Primary: front camera at reduced 640x480 resolution & 30fps for mobile performance
   try {
     return await navigator.mediaDevices.getUserMedia({
       video: {
-        facingMode: { ideal: 'user' },
+        facingMode: { ideal: facing },
         width: { ideal: 640 },
         height: { ideal: 480 },
         frameRate: { ideal: 30, max: 30 },
@@ -92,13 +115,63 @@ async function acquireFrontCameraStream(): Promise<MediaStream> {
     });
   } catch (err) {
     const name = (err as { name?: string } | null)?.name;
-    if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+    if (
+      name === 'OverconstrainedError' ||
+      name === 'ConstraintNotSatisfiedError'
+    ) {
       return await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' },
+        video: { facingMode: { ideal: facing } },
         audio: false,
       });
     }
     throw err;
+  }
+}
+
+async function acquireCameraStream(
+  requestedFacing: CameraFacing
+): Promise<AcquiredCameraResult> {
+  if (requestedFacing === 'user') {
+    const stream = await requestStreamForFacing('user');
+    return { stream, actualFacing: 'user', fellBackToFront: false };
+  }
+
+  // Rear camera requested: use facingMode: { ideal: 'environment' } and detect fallback cleanly
+  try {
+    const stream = await requestStreamForFacing('environment');
+    const videoTrack = stream.getVideoTracks()[0];
+    const trackFacing = videoTrack?.getSettings?.().facingMode;
+
+    if (trackFacing === 'user') {
+      return { stream, actualFacing: 'user', fellBackToFront: true };
+    }
+
+    if (!trackFacing && navigator.mediaDevices?.enumerateDevices) {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = devices.filter((d) => d.kind === 'videoinput');
+        if (videoInputs.length <= 1) {
+          return { stream, actualFacing: 'user', fellBackToFront: true };
+        }
+      } catch {
+        // Ignore device enumeration errors
+      }
+    }
+
+    return { stream, actualFacing: 'environment', fellBackToFront: false };
+  } catch (err) {
+    const name = (err as { name?: string } | null)?.name;
+    // Propagate permission denials rather than retrying
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+      throw err;
+    }
+    // Fall back to front camera when rear camera is unavailable
+    const fallbackStream = await requestStreamForFacing('user');
+    return {
+      stream: fallbackStream,
+      actualFacing: 'user',
+      fellBackToFront: true,
+    };
   }
 }
 
@@ -111,20 +184,116 @@ export default function App() {
   const [cameraError, setCameraError] = useState<CameraErrorInfo | null>(null);
   const [sandevistanActive, setSandevistanActive] = useState(false);
   const [gestureModelLoading, setGestureModelLoading] = useState(false);
+  const [cameraSwitching, setCameraSwitching] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedClip, setRecordedClip] = useState<RecordedClip | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const liveMeterRef = useRef<LiveMeterHandle | null>(null);
+  const recordingHudRef = useRef<RecordingHudHandle | null>(null);
 
   const settingsRef = useRef<SandevistanSettings>(settings);
   const streamRef = useRef<MediaStream | null>(null);
   const visionRef = useRef<VisionEngine | null>(null);
   const rendererRef = useRef<SandevistanRenderer | null>(null);
+  const recorderRef = useRef<CanvasRecorder>(new CanvasRecorder());
   const smootherRef = useRef<TriggerSmoother>(new TriggerSmoother(3, 10));
   const rafIdRef = useRef<number | null>(null);
   const activeUiStateRef = useRef(false);
+  const cameraStatusRef = useRef<CameraStatus>(cameraStatus);
+  const activeStreamFacingRef = useRef<CameraFacing>(settings.cameraFacing);
+  const isSwitchingCameraRef = useRef(false);
+  const toastTimerRef = useRef<number | null>(null);
+  const recordedClipRef = useRef<RecordedClip | null>(null);
 
-  // Sync settings ref + persist to localStorage
+  cameraStatusRef.current = cameraStatus;
+
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimerRef.current = null;
+    }, 4200);
+  }, []);
+
+  const handleClosePreview = useCallback(() => {
+    if (recordedClipRef.current) {
+      URL.revokeObjectURL(recordedClipRef.current.url);
+      recordedClipRef.current = null;
+    }
+    setRecordedClip(null);
+  }, []);
+
+  const switchActiveCamera = useCallback(
+    async (targetFacing: CameraFacing) => {
+      if (
+        cameraStatusRef.current !== 'active' ||
+        isSwitchingCameraRef.current
+      ) {
+        return;
+      }
+
+      isSwitchingCameraRef.current = true;
+      setCameraSwitching(true);
+
+      // Stop old stream tracks first (mobile Chrome often refuses opening rear while front is held)
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+
+      try {
+        const { stream, actualFacing, fellBackToFront } =
+          await acquireCameraStream(targetFacing);
+        streamRef.current = stream;
+        activeStreamFacingRef.current = actualFacing;
+
+        const video = videoRef.current;
+        if (video) {
+          video.srcObject = stream;
+          await video.play();
+        }
+
+        rendererRef.current?.clearTrails();
+
+        if (fellBackToFront) {
+          showToast('Rear camera unavailable — using front camera');
+          if (settingsRef.current.cameraFacing !== actualFacing) {
+            setSettings((prev) => ({ ...prev, cameraFacing: actualFacing }));
+          }
+        }
+      } catch (err) {
+        // If switching failed, try restoring front camera so the user isn't left stranded
+        try {
+          const fallback = await requestStreamForFacing('user');
+          streamRef.current = fallback;
+          activeStreamFacingRef.current = 'user';
+          const video = videoRef.current;
+          if (video) {
+            video.srcObject = fallback;
+            await video.play();
+          }
+          rendererRef.current?.clearTrails();
+          setSettings((prev) => ({ ...prev, cameraFacing: 'user' }));
+          showToast('Rear camera unavailable — using front camera');
+        } catch {
+          setCameraError(describeCameraError(err));
+          setCameraStatus('error');
+        }
+      } finally {
+        isSwitchingCameraRef.current = false;
+        setCameraSwitching(false);
+      }
+    },
+    [showToast]
+  );
+
+  // Sync settings ref + persist to localStorage + react to trigger/camera switches
   useEffect(() => {
     const prevTrigger = settingsRef.current.trigger;
     settingsRef.current = settings;
@@ -155,7 +324,22 @@ export default function App() {
           });
       }
     }
-  }, [settings]);
+
+    if (
+      settings.cameraFacing !== activeStreamFacingRef.current &&
+      cameraStatusRef.current === 'active'
+    ) {
+      void switchActiveCamera(settings.cameraFacing);
+    }
+  }, [settings, switchActiveCamera]);
+
+  const handleFlipCamera = useCallback(() => {
+    if (isSwitchingCameraRef.current) return;
+    setSettings((prev) => ({
+      ...prev,
+      cameraFacing: prev.cameraFacing === 'user' ? 'environment' : 'user',
+    }));
+  }, []);
 
   // Keep full-screen canvas sized to viewport with capped DPR for 30fps mobile fill-rate
   const syncCanvasSize = useCallback(() => {
@@ -180,7 +364,78 @@ export default function App() {
     };
   }, [syncCanvasSize]);
 
+  // Stop any active recording when the tab becomes hidden, keeping what was recorded so far
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden && recorderRef.current.isRecording()) {
+        recorderRef.current.stop();
+        setIsRecording(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  const handleToggleRecord = useCallback(async () => {
+    const recorder = recorderRef.current;
+    if (recorder.isRecording()) {
+      recorder.stop();
+      setIsRecording(false);
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas || cameraStatusRef.current !== 'active') return;
+
+    // Close any previous preview clip before starting a new recording
+    if (recordedClipRef.current) {
+      URL.revokeObjectURL(recordedClipRef.current.url);
+      recordedClipRef.current = null;
+      setRecordedClip(null);
+    }
+
+    const started = await recorder.start(
+      canvas,
+      settingsRef.current.recordAudio,
+      {
+        onComplete: (clip) => {
+          setIsRecording(false);
+          if (recordedClipRef.current) {
+            URL.revokeObjectURL(recordedClipRef.current.url);
+          }
+          recordedClipRef.current = clip;
+          setRecordedClip(clip);
+          if (clip.isWebmFallback) {
+            showToast(
+              'Your browser does not support MP4 recording — saved as WebM instead.'
+            );
+          }
+        },
+        onError: (message) => {
+          setIsRecording(false);
+          showToast(message);
+        },
+        onNotice: (message) => {
+          showToast(message);
+        },
+      }
+    );
+
+    if (started) {
+      setIsRecording(true);
+      recordingHudRef.current?.update(0, MAX_RECORDING_MS);
+    }
+  }, [showToast]);
+
   const stopCamera = useCallback(() => {
+    // Stop any active recording first so recorded footage is preserved
+    if (recorderRef.current.isRecording()) {
+      recorderRef.current.stop();
+      setIsRecording(false);
+    }
+
     if (rafIdRef.current !== null) {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
@@ -207,8 +462,16 @@ export default function App() {
   // Cleanup everything on unmount
   useEffect(() => {
     return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
+      }
+      recorderRef.current.dispose();
+      if (recordedClipRef.current) {
+        URL.revokeObjectURL(recordedClipRef.current.url);
+        recordedClipRef.current = null;
       }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
@@ -232,6 +495,19 @@ export default function App() {
       rafIdRef.current = requestAnimationFrame(tick);
 
       if (document.hidden) return;
+
+      // Update recording timer and progress bar imperatively (zero React re-renders)
+      if (recorderRef.current.isRecording()) {
+        recordingHudRef.current?.update(
+          recorderRef.current.getElapsedMs(),
+          MAX_RECORDING_MS
+        );
+      }
+
+      if (isSwitchingCameraRef.current) {
+        lastVideoTime = -1;
+        return;
+      }
       if (now - lastProcessedMs < TARGET_FRAME_MS) return;
 
       const video = videoRef.current;
@@ -261,14 +537,16 @@ export default function App() {
       const displayCtx = canvas.getContext('2d', { alpha: false });
       if (!displayCtx) return;
 
+      const currentSettings = settingsRef.current;
+      const shouldMirror = currentSettings.cameraFacing === 'user';
+
       renderer.syncProcessingResolution(video.videoWidth, video.videoHeight);
-      renderer.captureMirroredFrame(video);
+      renderer.captureMirroredFrame(video, shouldMirror);
 
       // MediaPipe requires strictly monotonically increasing timestamps (in ms)
       const ts = Math.max(Math.round(now), lastMediaPipeTs + 1);
       lastMediaPipeTs = ts;
 
-      const currentSettings = settingsRef.current;
       const useGesture = isGestureTrigger(currentSettings.trigger);
       let triggerValue = 0;
       let faceNoseX: number | undefined;
@@ -365,8 +643,17 @@ export default function App() {
     setCameraStatus('requesting');
 
     try {
-      const stream = await acquireFrontCameraStream();
+      const { stream, actualFacing, fellBackToFront } =
+        await acquireCameraStream(settingsRef.current.cameraFacing);
       streamRef.current = stream;
+      activeStreamFacingRef.current = actualFacing;
+
+      if (fellBackToFront) {
+        showToast('Rear camera unavailable — using front camera');
+        if (settingsRef.current.cameraFacing !== actualFacing) {
+          setSettings((prev) => ({ ...prev, cameraFacing: actualFacing }));
+        }
+      }
 
       const video = videoRef.current;
       if (!video) {
@@ -407,7 +694,7 @@ export default function App() {
       setCameraError(describeCameraError(err));
       setCameraStatus('error');
     }
-  }, [startProcessingLoop, syncCanvasSize]);
+  }, [showToast, startProcessingLoop, syncCanvasSize]);
 
   return (
     <main className="relative w-full h-[100dvh] overflow-hidden bg-[#06070b]">
@@ -421,40 +708,120 @@ export default function App() {
         aria-hidden="true"
       />
 
-      {/* Full-screen mirrored camera & Sandevistan canvas */}
+      {/* Full-screen camera & Sandevistan canvas */}
       <canvas
         ref={canvasRef}
         className="fixed inset-0 w-full h-full block bg-[#06070b]"
       />
 
       {/* Glitch label when Sandevistan is active */}
-      <SandevistanBadge active={cameraStatus === 'active' && sandevistanActive} />
+      <SandevistanBadge
+        active={cameraStatus === 'active' && sandevistanActive}
+      />
 
-      {/* Stop camera button positioned left of the Settings toggle so it never overlaps mobile drawer */}
-      {cameraStatus === 'active' && (
+      {/* Top-right action controls: Stop (when active), Flip Camera, Settings */}
+      <div
+        className="fixed top-4 right-4 z-40 flex items-center gap-2"
+        style={{ marginTop: 'env(safe-area-inset-top, 0px)' }}
+      >
+        {cameraStatus === 'active' && (
+          <button
+            type="button"
+            onClick={stopCamera}
+            aria-label="Stop camera"
+            className="min-h-[44px] min-w-[44px] px-3 inline-flex items-center justify-center gap-1.5 bg-[#090c14]/85 hover:bg-[#1a1020]/95 active:scale-[0.97] text-slate-300 hover:text-[#ff5ce1] border border-white/15 hover:border-[#ff2bd6]/50 backdrop-blur-md rounded-md transition-all focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff2bd6] whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <VideoOff className="w-4 h-4" aria-hidden="true" />
+            <span className="text-xs font-semibold tracking-wide hidden sm:inline">
+              Stop
+            </span>
+          </button>
+        )}
+
         <button
           type="button"
-          onClick={stopCamera}
-          aria-label="Stop camera"
-          className="fixed top-4 right-[118px] z-40 min-h-[44px] min-w-[44px] px-3 inline-flex items-center justify-center gap-1.5 bg-[#090c14]/85 hover:bg-[#1a1020]/95 active:scale-[0.97] text-slate-300 hover:text-[#ff5ce1] border border-white/15 hover:border-[#ff2bd6]/50 backdrop-blur-md rounded-md transition-all focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff2bd6] whitespace-nowrap shrink-0 cursor-pointer"
-          style={{ marginTop: 'env(safe-area-inset-top, 0px)' }}
+          disabled={cameraSwitching}
+          onClick={handleFlipCamera}
+          aria-label={
+            settings.cameraFacing === 'user'
+              ? 'Switch to rear camera'
+              : 'Switch to front camera'
+          }
+          title={
+            settings.cameraFacing === 'user'
+              ? 'Switch to rear camera'
+              : 'Switch to front camera'
+          }
+          className="min-h-[44px] min-w-[44px] px-3 inline-flex items-center justify-center gap-1.5 bg-[#090c14]/85 hover:bg-[#111726]/95 active:scale-[0.97] disabled:opacity-60 text-slate-100 border border-white/15 hover:border-[#00f0ff]/50 backdrop-blur-md rounded-md transition-all focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#00f0ff] whitespace-nowrap shrink-0 cursor-pointer"
         >
-          <VideoOff className="w-4 h-4" aria-hidden="true" />
+          <RefreshCw
+            className={`w-4 h-4 text-[#00f0ff] ${cameraSwitching ? 'animate-spin' : ''}`}
+            aria-hidden="true"
+          />
           <span className="text-xs font-semibold tracking-wide hidden sm:inline">
-            Stop
+            {settings.cameraFacing === 'user' ? 'Front' : 'Rear'}
           </span>
         </button>
+
+        <button
+          type="button"
+          onClick={() => setSettingsOpen((prev) => !prev)}
+          aria-expanded={settingsOpen}
+          aria-controls="sandevistan-settings-panel"
+          aria-label={settingsOpen ? 'Close settings' : 'Open settings'}
+          className="min-h-[44px] min-w-[44px] px-3.5 inline-flex items-center justify-center gap-2 bg-[#090c14]/85 hover:bg-[#111726]/95 active:scale-[0.97] text-slate-100 border border-white/15 hover:border-[#00f0ff]/50 backdrop-blur-md rounded-md transition-all focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#00f0ff] whitespace-nowrap shrink-0 cursor-pointer"
+        >
+          {settingsOpen ? (
+            <>
+              <X className="w-4 h-4 text-[#00f0ff]" aria-hidden="true" />
+              <span className="text-xs font-semibold tracking-wide">Close</span>
+            </>
+          ) : (
+            <>
+              <SlidersHorizontal
+                className="w-4 h-4 text-[#00f0ff]"
+                aria-hidden="true"
+              />
+              <span className="text-xs font-semibold tracking-wide">
+                Settings
+              </span>
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Non-blocking feedback toast */}
+      {toastMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed top-18 inset-x-4 z-50 flex justify-center"
+          style={{ marginTop: 'env(safe-area-inset-top, 0px)' }}
+        >
+          <div className="max-w-sm bg-[#090c14]/92 backdrop-blur-md border border-[#00f0ff]/45 text-slate-100 text-xs sm:text-sm font-medium px-3.5 py-2.5 rounded-md shadow-[0_12px_32px_rgba(0,0,0,0.7)] text-center">
+            {toastMessage}
+          </div>
+        </div>
       )}
+
+      {/* 30-second recording button, timer, and progress bar */}
+      <RecordingHud
+        ref={recordingHudRef}
+        visible={cameraStatus === 'active'}
+        isRecording={isRecording}
+        disabled={cameraSwitching}
+        onToggleRecord={() => void handleToggleRecord()}
+      />
 
       {/* Collapsible Settings Panel */}
       <SettingsPanel
         ref={liveMeterRef}
         open={settingsOpen}
-        onToggleOpen={() => setSettingsOpen((prev) => !prev)}
         settings={settings}
         onChange={setSettings}
         gestureModelLoading={gestureModelLoading}
         cameraActive={cameraStatus === 'active'}
+        cameraSwitching={cameraSwitching}
       />
 
       {/* Start Camera / Loading / Permission Error Overlay */}
@@ -463,6 +830,13 @@ export default function App() {
         error={cameraError}
         selectedTrigger={settings.trigger}
         onStartCamera={handleStartCamera}
+      />
+
+      {/* Recorded Video Preview & Export Sheet */}
+      <RecordingPreviewModal
+        clip={recordedClip}
+        onClose={handleClosePreview}
+        onNotice={showToast}
       />
     </main>
   );

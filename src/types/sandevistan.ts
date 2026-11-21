@@ -13,6 +13,8 @@ export type TriggerId =
 
 export type TriggerCategory = 'face' | 'gesture';
 
+export type CameraFacing = 'user' | 'environment';
+
 export interface TriggerOption {
   id: TriggerId;
   label: string;
@@ -26,6 +28,8 @@ export interface SandevistanSettings {
   trailLength: number;
   trailSpacing: number;
   glowEnabled: boolean;
+  cameraFacing: CameraFacing;
+  recordAudio: boolean;
 }
 
 export type CameraStatus =
@@ -39,4 +43,14 @@ export interface CameraErrorInfo {
   title: string;
   message: string;
   hint: string;
+}
+
+export interface RecordedClip {
+  blob: Blob;
+  url: string;
+  mimeType: string;
+  extension: 'mp4' | 'webm';
+  filename: string;
+  durationMs: number;
+  isWebmFallback: boolean;
 }

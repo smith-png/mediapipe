@@ -79,6 +79,8 @@ export const DEFAULT_SETTINGS: SandevistanSettings = {
   trailLength: 12,
   trailSpacing: 14,
   glowEnabled: true,
+  cameraFacing: 'user',
+  recordAudio: false,
 };
 
 export function isGestureTrigger(trigger: TriggerId): boolean {
@@ -124,12 +126,24 @@ export function loadSettings(): SandevistanSettings {
         ? parsed.glowEnabled
         : DEFAULT_SETTINGS.glowEnabled;
 
+    const cameraFacing =
+      parsed.cameraFacing === 'user' || parsed.cameraFacing === 'environment'
+        ? parsed.cameraFacing
+        : DEFAULT_SETTINGS.cameraFacing;
+
+    const recordAudio =
+      typeof parsed.recordAudio === 'boolean'
+        ? parsed.recordAudio
+        : DEFAULT_SETTINGS.recordAudio;
+
     return {
       trigger,
       threshold,
       trailLength,
       trailSpacing,
       glowEnabled,
+      cameraFacing,
+      recordAudio,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
